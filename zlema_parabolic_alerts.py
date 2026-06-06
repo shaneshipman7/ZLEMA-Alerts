@@ -28,11 +28,15 @@ def calculate_zlema(series: pd.Series, period: int = 15) -> pd.Series:
     return ema_input.ewm(span=period, adjust=False).mean()
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return true_range.rolling(window=period, min_periods=period).mean()
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period, min_periods=period).mean()
+    return atr
 
 def add_uptrend_streak(df: pd.DataFrame) -> pd.DataFrame:
     up = (
@@ -63,7 +67,13 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
         df = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
         if df.empty or len(df) < max(zlema_period, atr_period) + 10:
             return None
+
+        # Robust handling for modern yfinance (MultiIndex columns + alignment)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+        df = df.dropna()
+
         df['ZLEMA'] = calculate_zlema(df['Close'], zlema_period)
         df['ATR'] = calculate_atr(df, atr_period)
         df = add_uptrend_streak(df)
