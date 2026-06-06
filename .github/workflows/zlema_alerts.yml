@@ -1,0 +1,37 @@
+name: ZLEMA Parabolic Alerts
+
+on:
+  schedule:
+    # Run on weekdays during US market hours (times in UTC)
+    # 10:00 AM ET = 14:00 UTC
+    # 12:30 PM ET = 16:30 UTC
+    # 2:30 PM ET  = 18:30 UTC
+    - cron: '0 14 * * 1-5'   # 10:00 AM ET
+    - cron: '30 16 * * 1-5'  # 12:30 PM ET
+    - cron: '30 18 * * 1-5'  # 2:30 PM ET
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run ZLEMA Parabolic Alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python zlema_parabolic_alerts.py --tickers "HUBC,ASTS,WULF,PIII,IXHL" --min-streak 3

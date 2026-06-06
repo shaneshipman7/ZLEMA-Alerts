@@ -3,6 +3,8 @@
 ZLEMA Parabolic Run Alerts + Logical Trailing Stop Loss
 For swing/momentum trading (daily timeframe recommended).
 
+Can run locally or via GitHub Actions + Telegram.
+
 DISCLAIMER:
 This is for educational and research purposes only. Not financial advice.
 Trading involves substantial risk of loss. Past performance does not guarantee future results.
@@ -10,6 +12,7 @@ Always do your own due diligence and manage risk properly.
 """
 
 import argparse
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -21,11 +24,13 @@ DEFAULT_ATR_PERIOD = 14
 DEFAULT_MIN_STREAK = 3
 DEFAULT_EXTENSION_PCT = 0.05
 
+
 def calculate_zlema(series: pd.Series, period: int = 15) -> pd.Series:
     lag = (period - 1) // 2
     shifted = series.shift(lag)
     ema_input = series + (series - shifted.fillna(series.iloc[0]))
     return ema_input.ewm(span=period, adjust=False).mean()
+
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high = df['High']
@@ -37,6 +42,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = true_range.rolling(window=period, min_periods=period).mean()
     return atr
+
 
 def add_uptrend_streak(df: pd.DataFrame) -> pd.DataFrame:
     up = (
@@ -53,14 +59,36 @@ def add_uptrend_streak(df: pd.DataFrame) -> pd.DataFrame:
             current_streak = 0
     return df
 
+
 def send_telegram_alert(message: str):
-    """Placeholder - fill in your bot token and chat ID from your existing setups."""
-    print("\n[TELEGRAM PLACEHOLDER] Would send:\n" + message)
-    # import requests
-    # bot_token = "YOUR_BOT_TOKEN"
-    # chat_id = "YOUR_CHAT_ID"
-    # url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    # requests.post(url, data={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"})
+    """
+    Sends message via Telegram if credentials are available (from env vars or hardcoded).
+    Falls back to printing the message when running locally without credentials.
+    """
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not bot_token or not chat_id:
+        print("\n[LOCAL MODE] Telegram credentials not set. Message would have been:")
+        print(message)
+        return
+
+    try:
+        import requests
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, data=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ Telegram alert sent successfully")
+        else:
+            print(f"⚠️ Telegram error: {response.text}")
+    except Exception as e:
+        print(f"⚠️ Failed to send Telegram: {e}")
+
 
 def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int, extension_pct: float):
     try:
@@ -68,7 +96,7 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
         if df.empty or len(df) < max(zlema_period, atr_period) + 10:
             return None
 
-        # Robust handling for modern yfinance (MultiIndex columns + alignment)
+        # Robust handling for modern yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
@@ -111,6 +139,7 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
         print(f"Error processing {ticker}: {e}")
         return None
 
+
 def main():
     parser = argparse.ArgumentParser(description="ZLEMA Parabolic Run Alerts + Trailing SL")
     parser.add_argument('--tickers', type=str, default=DEFAULT_TICKERS)
@@ -140,9 +169,14 @@ def main():
             print(f"  ATR: ${a['atr']:.2f}")
             print(f"  >>> SUGGESTED TRAILING SL: ${a['trailing_sl']:.2f}  (ZLEMA - 1.5×ATR)")
 
-        msg_lines = ["*ZLEMA Parabolic Run Alerts*"]
+        # Build nice Telegram message
+        msg_lines = ["*🚨 ZLEMA Parabolic Run Alerts*"]
         for a in parabolic_alerts:
-            msg_lines.append(f"*{a['ticker']}* | Close ${a['close']:.2f} (+{a['extension_pct']:.1f}% ext) | Streak {a['streak']}d | Trailing SL ~${a['trailing_sl']:.2f}")
+            msg_lines.append(
+                f"*{a['ticker']}* | Close ${a['close']:.2f} (+{a['extension_pct']:.1f}% ext) | "
+                f"Streak {a['streak']}d | Trailing SL ~${a['trailing_sl']:.2f}"
+            )
+        msg_lines.append("\n_Run on GitHub Actions or locally_")
         send_telegram_alert("\n".join(msg_lines))
     else:
         print("\nNo parabolic runs meeting criteria right now.")
@@ -150,6 +184,7 @@ def main():
     print("\n" + "="*70)
     print("Done. Risk responsibly.")
     print("="*70 + "\n")
+
 
 if __name__ == "__main__":
     main()
