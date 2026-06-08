@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
-ZLEMA Parabolic Run Alerts + Logical Trailing Stop Loss
-For swing/momentum trading (daily timeframe recommended).
-
-Can run locally or via GitHub Actions + Telegram.
-
-DISCLAIMER:
-This is for educational and research purposes only. Not financial advice.
-Trading involves substantial risk of loss. Past performance does not guarantee future results.
-Always do your own due diligence and manage risk properly.
+ZLEMA Alerts: Bullish Flips + Parabolic Runs
+For swing/momentum trading (daily timeframe).
 """
 
 import argparse
@@ -18,7 +11,7 @@ import numpy as np
 from datetime import datetime
 import yfinance as yf
 
-DEFAULT_TICKERS = "XPO, XEL, XC, UMAC, TKO, TE, STGW, SOAR, SIDU, SES, SERV, SATL, RCAT, PLTR, PIII"
+DEFAULT_TICKERS = "HUBC,ASTS,WULF,PIII,IXHL"
 DEFAULT_ZLEMA_PERIOD = 15
 DEFAULT_ATR_PERIOD = 14
 DEFAULT_MIN_STREAK = 3
@@ -60,11 +53,15 @@ def add_uptrend_streak(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def detect_zlema_flip(df: pd.DataFrame):
+    """Detect bullish ZLEMA flip (cross above from below)"""
+    prev_below = df['Close'].shift(1) <= df['ZLEMA'].shift(1)
+    now_above = df['Close'] > df['ZLEMA']
+    flip = prev_below & now_above
+    return flip
+
+
 def send_telegram_alert(message: str):
-    """
-    Sends message via Telegram if credentials are available (from env vars or hardcoded).
-    Falls back to printing the message when running locally without credentials.
-    """
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -93,10 +90,9 @@ def send_telegram_alert(message: str):
 def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int, extension_pct: float):
     try:
         df = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
-        if df.empty or len(df) < max(zlema_period, atr_period) + 10:
-            return None
+        if df.empty or len(df) < max(zlema_period, atr_period) + 20:
+            return None, None
 
-        # Robust handling for modern yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
@@ -105,43 +101,59 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
         df['ZLEMA'] = calculate_zlema(df['Close'], zlema_period)
         df['ATR'] = calculate_atr(df, atr_period)
         df = add_uptrend_streak(df)
+        df['flip'] = detect_zlema_flip(df)
 
         recent = df.iloc[-1]
         prev = df.iloc[-2]
+
+        # === ZLEMA BULLISH FLIP ===
+        flip_alert = None
+        if df['flip'].iloc[-1]:
+            trailing_sl = round(recent['ZLEMA'] - 1.5 * recent['ATR'], 2)
+            flip_alert = {
+                'ticker': ticker.upper(),
+                'date': df.index[-1].date(),
+                'close': round(recent['Close'], 2),
+                'zlema': round(recent['ZLEMA'], 2),
+                'type': 'FLIP',
+                'trailing_sl': trailing_sl,
+                'atr': round(recent['ATR'], 2),
+            }
+
+        # === PARABOLIC RUN ===
+        parabolic_alert = None
         streak = int(recent['uptrend_streak'])
-        if streak < min_streak:
-            return None
+        if streak >= min_streak:
+            extension = (recent['Close'] - recent['ZLEMA']) / recent['ZLEMA']
+            zlema_slope = recent['ZLEMA'] - prev['ZLEMA']
+            prev_slope = prev['ZLEMA'] - df['ZLEMA'].iloc[-3] if len(df) > 2 else 0
+            accelerating = zlema_slope > prev_slope and zlema_slope > 0
+            is_parabolic = (extension >= extension_pct) or accelerating
 
-        extension = (recent['Close'] - recent['ZLEMA']) / recent['ZLEMA']
-        zlema_slope = recent['ZLEMA'] - prev['ZLEMA']
-        prev_slope = prev['ZLEMA'] - df['ZLEMA'].iloc[-3]
-        accelerating = zlema_slope > prev_slope and zlema_slope > 0
-        is_parabolic = (extension >= extension_pct) or accelerating
+            if is_parabolic:
+                trailing_sl = round(recent['ZLEMA'] - 1.5 * recent['ATR'], 2)
+                extension_pct_display = round(extension * 100, 1)
+                parabolic_alert = {
+                    'ticker': ticker.upper(),
+                    'date': df.index[-1].date(),
+                    'close': round(recent['Close'], 2),
+                    'zlema': round(recent['ZLEMA'], 2),
+                    'extension_pct': extension_pct_display,
+                    'streak': streak,
+                    'atr': round(recent['ATR'], 2),
+                    'trailing_sl': trailing_sl,
+                    'zlema_slope': round(zlema_slope, 4),
+                }
 
-        if not is_parabolic:
-            return None
+        return flip_alert, parabolic_alert
 
-        trailing_sl = round(recent['ZLEMA'] - 1.5 * recent['ATR'], 2)
-        extension_pct_display = round(extension * 100, 1)
-
-        return {
-            'ticker': ticker.upper(),
-            'date': df.index[-1].date(),
-            'close': round(recent['Close'], 2),
-            'zlema': round(recent['ZLEMA'], 2),
-            'extension_pct': extension_pct_display,
-            'streak': streak,
-            'atr': round(recent['ATR'], 2),
-            'trailing_sl': trailing_sl,
-            'zlema_slope': round(zlema_slope, 4),
-        }
     except Exception as e:
         print(f"Error processing {ticker}: {e}")
-        return None
+        return None, None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ZLEMA Parabolic Run Alerts + Trailing SL")
+    parser = argparse.ArgumentParser(description="ZLEMA Flip + Parabolic Run Alerts")
     parser.add_argument('--tickers', type=str, default=DEFAULT_TICKERS)
     parser.add_argument('--zlema-period', type=int, default=DEFAULT_ZLEMA_PERIOD)
     parser.add_argument('--atr-period', type=int, default=DEFAULT_ATR_PERIOD)
@@ -150,36 +162,46 @@ def main():
     args = parser.parse_args()
 
     tickers = [t.strip().upper() for t in args.tickers.split(',') if t.strip()]
-    print(f"\n🔍 Scanning {len(tickers)} tickers for ZLEMA parabolic runs...")
+    print(f"\n🔍 Scanning {len(tickers)} tickers for ZLEMA Flips + Parabolic Runs...")
 
+    flips = []
     parabolic_alerts = []
+
     for ticker in tickers:
-        alert = scan_ticker(ticker, args.zlema_period, args.atr_period, args.min_streak, args.extension_threshold)
-        if alert:
-            parabolic_alerts.append(alert)
+        flip, parabolic = scan_ticker(ticker, args.zlema_period, args.atr_period, args.min_streak, args.extension_threshold)
+        if flip:
+            flips.append(flip)
+        if parabolic:
+            parabolic_alerts.append(parabolic)
 
-    if parabolic_alerts:
-        print("\n" + "="*70)
-        print("🚨 ZLEMA PARABOLIC RUN ALERTS — LOGICAL TRAILING STOP LOSS")
-        print("="*70)
-        for a in parabolic_alerts:
-            print(f"\n{a['ticker']} | {a['date']}")
-            print(f"  Close: ${a['close']:.2f}   |   ZLEMA: ${a['zlema']:.2f} (+{a['extension_pct']:.1f}%)")
-            print(f"  Streak: {a['streak']} days   |   ZLEMA slope: {a['zlema_slope']:+.4f}")
-            print(f"  ATR: ${a['atr']:.2f}")
-            print(f"  >>> SUGGESTED TRAILING SL: ${a['trailing_sl']:.2f}  (ZLEMA - 1.5×ATR)")
+    # === SEND ALERTS ===
+    if flips or parabolic_alerts:
+        msg_lines = ["*🚨 ZLEMA ALERTS*"]
 
-        # Build nice Telegram message
-        msg_lines = ["*🚨 ZLEMA Parabolic Run Alerts*"]
-        for a in parabolic_alerts:
-            msg_lines.append(
-                f"*{a['ticker']}* | Close ${a['close']:.2f} (+{a['extension_pct']:.1f}% ext) | "
-                f"Streak {a['streak']}d | Trailing SL ~${a['trailing_sl']:.2f}"
-            )
-        msg_lines.append("\n_Run on GitHub Actions or locally_")
+        if flips:
+            print("\n" + "="*70)
+            print("🚨 ZLEMA BULLISH FLIPS")
+            print("="*70)
+            for a in flips:
+                print(f"\n{a['ticker']} | {a['date']}  ← BULLISH FLIP")
+                print(f"  Close: ${a['close']:.2f}   |   ZLEMA: ${a['zlema']:.2f}")
+                print(f"  >>> Suggested Trailing SL: ${a['trailing_sl']:.2f}")
+                msg_lines.append(f"*{a['ticker']}* ← **Bullish ZLEMA Flip** | Close ${a['close']:.2f} | SL ~${a['trailing_sl']:.2f}")
+
+        if parabolic_alerts:
+            print("\n" + "="*70)
+            print("🚨 ZLEMA PARABOLIC RUNS")
+            print("="*70)
+            for a in parabolic_alerts:
+                print(f"\n{a['ticker']} | {a['date']}")
+                print(f"  Close: ${a['close']:.2f} (+{a['extension_pct']:.1f}%)")
+                print(f"  Streak: {a['streak']} days")
+                print(f"  >>> Trailing SL: ${a['trailing_sl']:.2f}")
+                msg_lines.append(f"*{a['ticker']}* Parabolic Run | +{a['extension_pct']:.1f}% | Streak {a['streak']}d | SL ~${a['trailing_sl']:.2f}")
+
         send_telegram_alert("\n".join(msg_lines))
     else:
-        print("\nNo parabolic runs meeting criteria right now.")
+        print("\nNo ZLEMA flips or parabolic runs meeting criteria right now.")
 
     print("\n" + "="*70)
     print("Done. Risk responsibly.")
