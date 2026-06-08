@@ -1,21 +1,42 @@
 #!/usr/bin/env python3
 """
 ZLEMA Alerts: Bullish Flips + Parabolic Runs
-For swing/momentum trading (daily timeframe).
+Now pulls live watchlist from wild-swing-playbook
 """
 
 import argparse
 import os
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime
 import yfinance as yf
 
-DEFAULT_TICKERS = "HUBC,ASTS,WULF,PIII,IXHL"
 DEFAULT_ZLEMA_PERIOD = 15
 DEFAULT_ATR_PERIOD = 14
 DEFAULT_MIN_STREAK = 3
 DEFAULT_EXTENSION_PCT = 0.05
+
+WATCHLIST_URL = "https://raw.githubusercontent.com/shaneshipman7/wild-swing-playbook/main/Playbook_Watchlist_Import_"
+
+
+def get_latest_watchlist():
+    """Fetch the most recent Playbook_Watchlist_Import file"""
+    try:
+        # Get latest date from GitHub contents (simple fallback)
+        for days_ago in range(0, 8):  # check last 7 days
+            date_str = (datetime.now() - pd.Timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            url = f"{WATCHLIST_URL}{date_str}.txt"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                content = resp.text.strip()
+                tickers = [t.strip().replace('$', '').upper() for t in content.split(',') if t.strip()]
+                print(f"✅ Loaded {len(tickers)} tickers from latest watchlist ({date_str})")
+                return tickers
+        print("⚠️ Could not find recent watchlist, using fallback")
+    except Exception as e:
+        print(f"⚠️ Watchlist fetch failed: {e}")
+    return ["HUBC", "ASTS", "WULF", "PIII", "IXHL"]  # fallback
 
 
 def calculate_zlema(series: pd.Series, period: int = 15) -> pd.Series:
@@ -33,8 +54,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = true_range.rolling(window=period, min_periods=period).mean()
-    return atr
+    return true_range.rolling(window=period, min_periods=period).mean()
 
 
 def add_uptrend_streak(df: pd.DataFrame) -> pd.DataFrame:
@@ -54,11 +74,9 @@ def add_uptrend_streak(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_zlema_flip(df: pd.DataFrame):
-    """Detect bullish ZLEMA flip (cross above from below)"""
     prev_below = df['Close'].shift(1) <= df['ZLEMA'].shift(1)
     now_above = df['Close'] > df['ZLEMA']
-    flip = prev_below & now_above
-    return flip
+    return prev_below & now_above
 
 
 def send_telegram_alert(message: str):
@@ -66,18 +84,14 @@ def send_telegram_alert(message: str):
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     if not bot_token or not chat_id:
-        print("\n[LOCAL MODE] Telegram credentials not set. Message would have been:")
+        print("\n[LOCAL MODE] Telegram not configured. Would have sent:")
         print(message)
         return
 
     try:
         import requests
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
         response = requests.post(url, data=payload, timeout=10)
         if response.status_code == 200:
             print("✅ Telegram alert sent successfully")
@@ -95,8 +109,7 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-        df = df.dropna()
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy().dropna()
 
         df['ZLEMA'] = calculate_zlema(df['Close'], zlema_period)
         df['ATR'] = calculate_atr(df, atr_period)
@@ -106,7 +119,6 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
         recent = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # === ZLEMA BULLISH FLIP ===
         flip_alert = None
         if df['flip'].iloc[-1]:
             trailing_sl = round(recent['ZLEMA'] - 1.5 * recent['ATR'], 2)
@@ -120,7 +132,6 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
                 'atr': round(recent['ATR'], 2),
             }
 
-        # === PARABOLIC RUN ===
         parabolic_alert = None
         streak = int(recent['uptrend_streak'])
         if streak >= min_streak:
@@ -142,7 +153,6 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
                     'streak': streak,
                     'atr': round(recent['ATR'], 2),
                     'trailing_sl': trailing_sl,
-                    'zlema_slope': round(zlema_slope, 4),
                 }
 
         return flip_alert, parabolic_alert
@@ -153,15 +163,19 @@ def scan_ticker(ticker: str, zlema_period: int, atr_period: int, min_streak: int
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ZLEMA Flip + Parabolic Run Alerts")
-    parser.add_argument('--tickers', type=str, default=DEFAULT_TICKERS)
+    parser = argparse.ArgumentParser(description="ZLEMA Flip + Parabolic Run Alerts (Live Watchlist)")
+    parser.add_argument('--tickers', type=str, default=None, help="Override tickers (comma-separated)")
     parser.add_argument('--zlema-period', type=int, default=DEFAULT_ZLEMA_PERIOD)
     parser.add_argument('--atr-period', type=int, default=DEFAULT_ATR_PERIOD)
     parser.add_argument('--min-streak', type=int, default=DEFAULT_MIN_STREAK)
     parser.add_argument('--extension-threshold', type=float, default=DEFAULT_EXTENSION_PCT)
     args = parser.parse_args()
 
-    tickers = [t.strip().upper() for t in args.tickers.split(',') if t.strip()]
+    if args.tickers:
+        tickers = [t.strip().upper() for t in args.tickers.split(',') if t.strip()]
+    else:
+        tickers = get_latest_watchlist()
+
     print(f"\n🔍 Scanning {len(tickers)} tickers for ZLEMA Flips + Parabolic Runs...")
 
     flips = []
@@ -174,7 +188,6 @@ def main():
         if parabolic:
             parabolic_alerts.append(parabolic)
 
-    # === SEND ALERTS ===
     if flips or parabolic_alerts:
         msg_lines = ["*🚨 ZLEMA ALERTS*"]
 
