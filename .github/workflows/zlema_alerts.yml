@@ -1,37 +1,32 @@
-name: ZLEMA Parabolic Alerts
+name: ZLEMA Multi-TF Alerts
 
 on:
   schedule:
-    # Run on weekdays during US market hours (times in UTC)
-    # 10:00 AM ET = 14:00 UTC
-    # 12:30 PM ET = 16:30 UTC
-    # 2:30 PM ET  = 18:30 UTC
-    - cron: '0 14 * * 1-5'   # 10:00 AM ET
-    - cron: '30 16 * * 1-5'  # 12:30 PM ET
-    - cron: '30 18 * * 1-5'  # 2:30 PM ET
-  workflow_dispatch:          # Allow manual trigger from GitHub UI
+    - cron: '*/15 9-16 * * 1-5'   # Every 15 min during market hours (Mon-Fri)
+  workflow_dispatch:              # Allows manual trigger
 
 jobs:
-  run-alerts:
+  scan:
     runs-on: ubuntu-latest
 
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install yfinance pandas requests
 
-      - name: Run ZLEMA Parabolic Alerts
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Run ZLEMA Alerts (with explicit tickers)
         run: |
-          python zlema_parabolic_alerts.py --tickers "HUBC,ASTS,WULF,PIII,IXHL" --min-streak 3
+          python3 zlema_alerts.py --tickers "HUBC,ASTS,WULF,PIII,IXHL,TE,EOSE,GE,SES,TKO,XPO"
+        # Change "zlema_alerts.py" to whatever your actual script filename is
