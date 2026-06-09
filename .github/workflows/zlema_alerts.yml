@@ -28,5 +28,5 @@ jobs:
 
       - name: Run ZLEMA Alerts (with explicit tickers)
         run: |
-          python3 zlema_alerts.py --tickers "HUBC,ASTS,WULF,PIII,IXHL,TE,EOSE,GE,SES,TKO,XPO"
+          python3 zlema_parabolic_alerts.py --tickers "HUBC,ASTS,WULF,PIII,IXHL" --min-streak 3
         # Change "zlema_alerts.py" to whatever your actual script filename is
