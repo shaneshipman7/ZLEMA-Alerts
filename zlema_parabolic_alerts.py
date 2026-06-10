@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
+
 """
 ZLEMA Multi-Timeframe Alerts: Bullish + Bearish Flips + Parabolic Runs
 Automatically detects best timeframe (1h/2h/4h/1d) for each ticker
+
+Updated with:
+- Robust timezone handling
+- Improved Telegram delivery confirmation
+- --test-telegram flag for easy testing
 """
 
 import argparse
@@ -18,24 +24,31 @@ DEFAULT_EXTENSION_PCT = 0.05
 
 WATCHLIST_URL_BASE = "https://raw.githubusercontent.com/shaneshipman7/wild-swing-playbook/main/Playbook_Watchlist_Import_"
 
+
 # ─────────────────────────────────────────────
-# MARKET HOURS GATE
+# MARKET HOURS GATE (robust timezone)
 # ─────────────────────────────────────────────
 def is_market_open_now() -> bool:
     try:
-        et_time = datetime.now(pd.UTC).tz_convert('America/New_York')
+        et_time = pd.Timestamp.now(tz='America/New_York')
     except Exception:
-        et_time = pd.Timestamp(datetime.utcnow()).tz_localize('UTC').tz_convert('America/New_York')
+        # Fallback
+        et_time = pd.Timestamp.utcnow().tz_convert('America/New_York')
+
     if et_time.weekday() >= 5:
         print("🛑 Weekend — markets closed. Exiting.")
         return False
+
     market_open = et_time.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = et_time.replace(hour=16, minute=0, second=0, microsecond=0)
+
     if et_time < market_open or et_time > market_close:
         print(f"🛑 Outside RTH. Current ET: {et_time.strftime('%Y-%m-%d %H:%M:%S')} — Exiting.")
         return False
+
     print(f"🟢 Market open. ET: {et_time.strftime('%H:%M:%S')}")
     return True
+
 
 # ─────────────────────────────────────────────
 # WATCHLIST
@@ -56,6 +69,7 @@ def get_latest_watchlist():
         print(f"⚠️ Watchlist fetch failed: {e}")
     return ["HUBC", "ASTS", "WULF", "PIII", "IXHL", "TE", "EOSE", "GE", "SES", "TKO", "XPO"]
 
+
 # ─────────────────────────────────────────────
 # INDICATORS
 # ─────────────────────────────────────────────
@@ -65,6 +79,7 @@ def calculate_zlema(series: pd.Series, period: int = 15) -> pd.Series:
     ema_input = series + (series - shifted.fillna(series.iloc[0]))
     return ema_input.ewm(span=period, adjust=False).mean()
 
+
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     high, low, close = df['High'], df['Low'], df['Close']
     tr = pd.concat([
@@ -73,6 +88,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
         (low - close.shift(1)).abs()
     ], axis=1).max(axis=1)
     return tr.rolling(window=period, min_periods=period).mean()
+
 
 def add_trend_streaks(df: pd.DataFrame) -> pd.DataFrame:
     up = (df['Close'] > df['ZLEMA'] * 0.999) & (df['ZLEMA'] > df['ZLEMA'].shift(1).fillna(df['ZLEMA'].iloc[0]) * 0.999)
@@ -93,6 +109,7 @@ def add_trend_streaks(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[df.index[i], 'downtrend_streak'] = down_streak
     return df
 
+
 def detect_flips(df: pd.DataFrame):
     prev_close = df['Close'].shift(1)
     prev_zlema = df['ZLEMA'].shift(1)
@@ -101,6 +118,7 @@ def detect_flips(df: pd.DataFrame):
     bull_flip = (prev_close <= prev_zlema) & (curr_close > curr_zlema)
     bear_flip = (prev_close >= prev_zlema) & (curr_close < curr_zlema)
     return bull_flip, bear_flip
+
 
 # ─────────────────────────────────────────────
 # MULTI-TIMEFRAME SCAN
@@ -111,18 +129,18 @@ def get_best_timeframe(ticker: str, zlema_period=15, atr_period=14, min_streak=3
     except ImportError:
         print("❌ yfinance not installed. Run: pip install yfinance")
         sys.exit(1)
-    
+
     timeframes = {
         '1h': {'interval': '60m', 'period': '5d'},
         '2h': {'interval': '60m', 'period': '10d'},
         '4h': {'interval': '60m', 'period': '15d'},
         '1d': {'interval': '1d', 'period': '1y'},
     }
-    
+
     best_score = -1
     best_tf = None
     best_data = None
-    
+
     for tf_name, config in timeframes.items():
         try:
             df = yf.download(ticker, interval=config['interval'], period=config['period'],
@@ -132,7 +150,7 @@ def get_best_timeframe(ticker: str, zlema_period=15, atr_period=14, min_streak=3
 
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            
+
             df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna().copy()
 
             if tf_name in ['2h', '4h']:
@@ -189,35 +207,65 @@ def get_best_timeframe(ticker: str, zlema_period=15, atr_period=14, min_streak=3
 
     return best_tf, best_data
 
+
 # ─────────────────────────────────────────────
-# TELEGRAM
+# TELEGRAM (improved with success check)
 # ─────────────────────────────────────────────
 def send_telegram_alert(message: str):
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
     if not bot_token or not chat_id:
         print("\n[LOCAL MODE] Alert:\n" + message)
-        return
+        return False
+
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-        requests.post(url, data=payload, timeout=10)
-        print("✅ Telegram alert sent")
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+        resp = requests.post(url, data=payload, timeout=15)
+
+        if resp.status_code == 200 and resp.json().get("ok"):
+            print("✅ Telegram alert sent successfully")
+            return True
+        else:
+            print(f"⚠️ Telegram API error: {resp.text}")
+            return False
     except Exception as e:
         print(f"⚠️ Telegram failed: {e}")
+        return False
+
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    if not is_market_open_now():
-        sys.exit(0)
-
     parser = argparse.ArgumentParser(description="Multi-TF ZLEMA Alerts")
     parser.add_argument('--tickers', type=str, default=None)
     parser.add_argument('--min-streak', type=int, default=DEFAULT_MIN_STREAK,
                         help='Minimum streak length to trigger alert (default: 3)')
+    parser.add_argument('--test-telegram', action='store_true',
+                        help='Send a test message to Telegram and exit immediately')
     args = parser.parse_args()
+
+    # ── TEST MODE ─────────────────────────────────────
+    if args.test_telegram:
+        test_msg = (
+            "🧪 *TEST MESSAGE* from ZLEMA Multi-TF Alerts\n\n"
+            f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            "If you received this, your Telegram integration is working correctly ✅"
+        )
+        send_telegram_alert(test_msg)
+        print("\nTest complete. Check your Telegram chat.")
+        sys.exit(0)
+
+    # ── NORMAL RUN ────────────────────────────────────
+    if not is_market_open_now():
+        sys.exit(0)
 
     tickers = (
         get_latest_watchlist() if not args.tickers
@@ -257,7 +305,7 @@ def main():
             print(f" Streak: {a['up_streak']} bars | Trailing SL: ${a['bull_sl']:.2f}")
             msg_lines.append(
                 f"*{a['ticker']}* ({a['tf'].upper()}){flip_tag} | ${a['close']:.2f} +{a['bull_ext']:.1f}% | "
-                f"Streak {a['up_streak']} | SL ~${a['bull_sl']:.2f}"
+                f"Streak {a['up_streak']} | SL \~${a['bull_sl']:.2f}"
             )
 
     if bear_alerts:
@@ -272,7 +320,7 @@ def main():
             print(f" Streak: {a['down_streak']} bars | Trailing SL: ${a['bear_sl']:.2f}")
             msg_lines.append(
                 f"*{a['ticker']}* ({a['tf'].upper()}){flip_tag} | ${a['close']:.2f} -{a['bear_ext']:.1f}% | "
-                f"Streak {a['down_streak']} | SL ~${a['bear_sl']:.2f}"
+                f"Streak {a['down_streak']} | SL \~${a['bear_sl']:.2f}"
             )
 
     if not bull_alerts and not bear_alerts:
@@ -280,6 +328,7 @@ def main():
 
     send_telegram_alert("\n".join(msg_lines))
     print("\nDone. Risk responsibly. 🎯")
+
 
 if __name__ == "__main__":
     main()
