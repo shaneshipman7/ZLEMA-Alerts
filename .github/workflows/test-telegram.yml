@@ -1,7 +1,7 @@
 name: Test Telegram Integration
 
 on:
-  workflow_dispatch:   # Allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   test-telegram:
@@ -24,5 +24,4 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python3 zlema_parabolic_alerts.py --test-telegram
+        run: python3 zlema_parabolic_alerts.py --test-telegram
